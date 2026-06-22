@@ -133,7 +133,7 @@ derived:
 ## Findings
 
 ### 1. Before transition — raw delinquency snapshot
-`dpd_rate_trend.png`
+![Delinquency rate trend](./dpd_rate_trend.png)
 
 The COVID shock produced a textbook roll-rate cascade: 1-30 DPD spiked first
 (Apr 2020), followed by 31-60 DPD, then 61-90 DPD — each peak smaller than the
@@ -145,7 +145,7 @@ by home-price appreciation, stimulus, and low rates acting as a credit-loss
 absorption mechanism rather than a conversion into permanent losses.
 
 ### 2. After transition — 12-month roll-to-default check
-`bucket_transition_trend.png`
+![12-month roll-to-default rate by starting bucket](./bucket_transition_trend.png)
 
 The 12-month forward transition rate increases sharply and monotonically with
 delinquency severity at the starting point. Loans starting Current show the
@@ -154,7 +154,7 @@ DPD roll to default at dramatically higher rates, since that population has
 already survived multiple cure opportunities without curing.
 
 ### 3. Selected MEV vs ODR
-`selected_mev_vs_odr.png`
+![Selected MEV vs ODR](./selected_mev_vs_odr.png)
 
 Each macroeconomic variable that passed the sign and correlation-strength
 test is plotted against the yearly ODR series to visually confirm the
