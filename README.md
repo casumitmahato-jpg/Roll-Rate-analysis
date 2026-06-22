@@ -1,11 +1,11 @@
 # Roll Rate Analysis and Point-in-Time (PIT) PD Term Structure Modeling
 
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
-[![Jupyter](https://img.shields.io/badge/Jupyter-Notebook-orange.svg)](https://jupyter.org/)
+[![Kaggle](https://img.shields.io/badge/Kaggle-Notebook-lightblue.svg)](https://www.kaggle.com/)
 [![Risk Modeling](https://img.shields.io/badge/Domain-Credit%20Risk%20Analytics-red.svg)](https://en.wikipedia.org/wiki/Credit_risk)
 [![Framework](https://img.shields.io/badge/Regulatory-IFRS%209%20%7C%20Ind%20AS%20109-green.svg)](https://www.ifrs.org/issued-standards/list-of-standards/ifrs-9-financial-instruments/)
 
-An end-to-end Probability of Default (PD) modeling pipeline using 12-month forward roll-rate (transition) analysis on Freddie Mac single-family loan-level data. The notebook converts raw loan status histories into a macroeconomic-adjusted, forward-looking Point-in-Time (PIT) PD term structure suitable for IFRS 9 / Ind AS 109 Expected Credit Loss (ECL) provisioning.
+An end-to-end Probability of Default (PD) modeling pipeline using 12-month forward roll-rate (transition) analysis on Freddie Mac single-family loan-level data. The notebook converts raw loan status history into a robust PD term structure calibrated to both empirical roll rates and macroeconomic scenarios.
 
 ---
 
@@ -62,7 +62,7 @@ To make processing tractable on commodity hardware, Parquet format (pyarrow) was
 
 ## Data Cleaning, Imputation, & Limitations
 
-The raw panel contained `NR` (not reported) months. The textbook fix is rule-based interpolation (e.g., 1 → NR → 3 → interpolate 2), but row-by-row imputation over millions of loans exceeded the available RAM and CPU on a laptop. To avoid introducing complex imputation bias and to keep processing feasible, any loan with one or more missing months was dropped.
+The raw panel contained `NR` (not reported) months. The textbook fix is rule-based interpolation (e.g., 1 → NR → 3 → interpolate 2), but row-by-row imputation over millions of loans exceeded compute limits on standard hardware.
 
 Result: a final, clean panel of ~1.3 million loans with uninterrupted 72-month histories.
 
@@ -148,15 +148,22 @@ Final PD(t) = 0.80·PD_Base(t) + 0.10·PD_Opt(t) + 0.10·PD_Pess(t)
 
 Prerequisites:
 - Python 3.8+
-- Recommended: conda virtual environment
+- Recommended: Kaggle Notebook environment
 
-Install and run:
+View and run on Kaggle:
+
+```bash
+# Open the notebook directly on Kaggle to run and iterate on the analysis
+https://www.kaggle.com/
+```
+
+Or clone and run locally:
 
 ```bash
 git clone https://github.com/casumitmahato-jpg/Roll-Rate-analysis.git
 cd Roll-Rate-analysis
 pip install -r requirements.txt
-jupyter notebook notebooks/roll_rate_pd_modeling.ipynb
+python notebooks/roll_rate_pd_modeling.py
 ```
 
 ---
