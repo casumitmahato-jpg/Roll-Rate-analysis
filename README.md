@@ -31,8 +31,8 @@ The pipeline is organized into distinct phases:
 
 ```mermaid
 graph TD
-    A["Raw Data Ingestion (565M Rows)"] --> B["Active Loan Selection (Jan 2018)"]
-    B --> C["Stratified Random Sampling"]
+    A["Active Loan Selection (Jan 2018)"] --> B["Stratified Random Sampling"]
+    B --> C["Raw Data Ingestion (565M Rows)"]
     C --> D["Panel Data Construction & Cleaning"]
     D --> E["12-Month Roll Rate Transition Matrix"]
     E --> F["Macroeconomic Variable (MEV) Correlation Filter"]
