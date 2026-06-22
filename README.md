@@ -6,34 +6,15 @@ Loan-Level dataset. The notebook tracks how loans move between delinquency
 buckets over a 12-month horizon — i.e. of all loans that were Current (or
 30/60/90 DPD) at month B, what share end up in default 12 months later — and
 aggregates this into bucket-level transition rates, yearly trends, and a
-macroeconomic correlation check against the resulting default rate (ODR).
-
-## Visualizations (included)
-Note: the images referenced below should be present in the repository root or
-an `outputs/` directory; filenames used here match the notebook outputs.
-
-- `selected_mev_vs_odr.png` — selected macroeconomic variables (growth/indices)
-  plotted against yearly ODR to check correlation and sign consistency (image 1)
-
-  ![Selected MEV vs ODR](selected_mev_vs_odr.png)
-
-- `dpd_rate_trend.png` — monthly delinquency bucket rates (before transition)
-  showing how 1-30, 31-60, 61-90 and 91+ DPD evolved across the sample window (image 2)
-
-  ![Delinquency bucket rates by reporting month](dpd_rate_trend.png)
-
-- `bucket_transition_trend.png` — 12-month forward roll-to-default rate by
-  starting bucket (after transition). This is the core output for PD-term
-  structure inference and provisioning work (image 3)
-
-  ![12-Month forward transition rate to default by starting bucket](bucket_transition_trend.png)
+macroeconomic correlation check against the resulting default rate (ODR), feeding
+into a full Vasicek/ASRF PIT PD term structure.
 
 ## Why roll rates
 Roll-rate analysis is a foundational building block for credit risk and
-provisioning work — both IFRS 9 (and its Indian equivalent, Ind AS 109) and
-CECL ECL models, as well as Basel PD estimation. It gives a direct, empirical
-read on how delinquency emerges and progresses through a portfolio over time,
-independent of any modelling assumptions — useful both as a standalone
+provisioning work — both **IFRS 9** (and its Indian equivalent, **Ind AS 109**)
+and **CECL** ECL models, as well as Basel PD estimation. It gives a direct,
+empirical read on how delinquency emerges and progresses through a portfolio
+over time, independent of any model assumptions — useful both as a standalone
 diagnostic and as an input into PD term-structure construction for expected
 credit loss provisioning under either framework.
 
@@ -42,69 +23,143 @@ portfolio. A transition matrix tells you the *trajectory* — which is what
 actually feeds into IFRS 9 / Ind AS 109 stage migration, PD term-structure
 construction, and ECL provisioning.
 
+## My Journey
+
+I started with Freddie Mac's raw origination (observation) and monthly
+performance data spanning 2015 to 2023. From the full population, I selected
+loans that were **active as of the January 2018 snapshot date**, and applied a
+**stratified random sample** on top of that, with the condition that each
+selected loan had **complete performance history from Jan 2018 through Dec
+2023**. I then mapped every loan ID to its monthly performance status by
+reporting month — at this stage the underlying performance data ran to
+**~565 million rows**. Pivoting this into a wide table (loan ID as rows,
+reporting month as columns) left me with **~17 million unique loan IDs**.
+
+While building this, I noticed a number of rows carried an `NR` (not
+reported) status. My ideal approach for handling this would have been a
+**rule-based interpolation**: where a single reporting month was missing
+between two known values, infer the missing bucket from the surrounding
+values (e.g. if the value before is 1 and the value after is 3, the missing
+month is likely 2; if the next value is 0, the missing month is likely 0, and
+so on). However, working on a personal laptop with limited RAM and storage,
+this kind of conditional row-by-row imputation across millions of loans
+wasn't feasible. Instead, I took the more conservative route and **dropped
+every loan that had even a single missing reporting month**, which is the
+main data-completeness limitation of this analysis (see Limitations below).
+I also worked with **parquet instead of CSV** throughout, since parquet
+allows reading only the columns actually needed for a given step, which
+mattered a lot given the storage and RAM constraints of processing this at
+scale on a laptop.
+
+After dropping incomplete loans, I was left with **~1.3 million loans** with
+fully complete monthly performance from Jan 2018 to Dec 2023. From this
+clean panel, I computed month-by-month delinquency bucket counts and shares —
+the resulting chart turned out to be genuinely interesting to look at,
+because the COVID-19 period (Apr 2020 onward) shows a textbook roll-rate
+cascade: 1-30 DPD spiked first, then 31-60 DPD, then 61-90 DPD, each peak
+smaller than the last as borrowers cured or entered forbearance — followed by
+early-stage buckets staying elevated even as they declined from their peaks,
+which kept feeding inflow into 91+ DPD well after the initial shock had
+passed.
+
+From there, I built a **12-month forward transition table**, measuring for
+each starting bucket how much of that bucket's population rolled into default
+within 12 months — visualized in the corresponding graph — and then averaged
+these transition rates **year by year from 2018 to 2022**.
+
+Since my underlying loan data is U.S.-based, I sourced **U.S. macroeconomic
+variables (MEVs)** — around 12 candidates, covering both index levels and
+growth rates. I tested each against the yearly ODR series on two criteria:
+correlation strength (**|r| > 0.50**) and a **sign test** (actual correlation
+sign matching the economically expected sign). **6 MEVs passed both tests**:
+`Real_GDP_Growth_Pct`, `Ind_Prod_Index`, `Ind_Prod_Growth_Pct`,
+`Case_Shiller_Growth_Pct`, `FHFA_HPI_Growth_Pct`, and `Unemployment_Rate`.
+
+I then built **three forward scenarios for 2023–2027** for each selected MEV:
+**baseline** (the projected/mean MEV path), and **optimistic / pessimistic**
+as **+1 / -1 standard deviation** around the baseline. Each MEV was given
+**equal weight** in combining them into a single standardized **final
+economic factor** per scenario per year.
+
+This economic factor feeds into a **Vasicek/ASRF (Merton-style) model** to
+convert each bucket's **through-the-cycle (TTC) PD** into a **point-in-time
+(PIT) PD**, using an asset correlation (**rho = 0.15**) for every bucket.
+
+Because the PIT PD from this conversion is a **conditional PD** — conditional
+on having survived to the start of that forward year — I built a **survival
+analysis** to convert these into **unconditional PDs**:
+- Year 1: unconditional PD = conditional PD (no prior survival to condition on); survival after year 1 = 1 − conditional PD(year 1).
+- Year 2 onward: unconditional PD(year *n*) = conditional PD(year *n*) × survival(year *n−1*); survival(year *n*) = survival(year *n−1*) − unconditional PD(year *n*).
+
+After computing unconditional PDs for all three scenarios, I applied scenario
+weights of **80% baseline / 10% optimistic / 10% pessimistic** to get a single
+weighted unconditional PD per bucket per year. From this final table, I
+derived:
+- **Stage 1 PD** — the bucket-wise, year-wise 1-year unconditional forward PD.
+- **Stage 2 PD** — the cumulative PD over the remaining life of the loan, calculated by summing all yearly unconditional PDs.
+
 ## Dataset
 
-### Source
-Freddie Mac Single-Family Loan-Level Dataset, monthly performance panel.
-Delinquency buckets used: Current, 1-30 DPD, 31-60 DPD, 61-90 DPD, 91+ DPD (default).
-
 ### Sample design
-- Loans originated between 2015 and Jan 2018, all still active as of the
-  January 2018 reporting month, tracked monthly through Dec 2023 — giving
-  each loan a multi-year observation window to capture the full
-  delinquency-to-default progression, including the COVID-19 forbearance period.
-- Drawn as a stratified random sample of 100,000 loans by origination
-  quarter (Hamilton remainder method), to preserve the relative vintage
-  composition of the original population rather than skewing toward any
-  single origination period.
+- Loans **originated between 2015 and Jan 2018**, all still active as of the
+  January 2018 reporting month, tracked monthly through **Dec 2023**.
+- Drawn as a **stratified random sample by origination quarter**, to preserve
+  the relative vintage composition of the original population rather than
+  skewing toward any single origination period.
+- Final analysis population: **~1.3 million loans** with fully complete
+  monthly performance data from Jan 2018 to Dec 2023, after removing any loan
+  with even a single missing (`NR`) reporting month.
 
 ## Methodology
-1. Batch processing with checkpointing — the full performance panel is too
-   large to load in memory, so it's processed in chunks via `pyarrow.parquet`
-   batch iteration, with per-batch checkpoint/resume logic (parquet accumulator
-   + progress file) to survive interruptions on long-running jobs.
-2. Before-transition snapshot — month-by-month share of loans in each
-   delinquency bucket, as a raw baseline diagnostic (no roll-rate logic
-   applied yet — just checking what the data itself looks like).
-3. 12-month forward transition — for each starting bucket, computes the
-   12-month roll-to-default rate (numerator/denominator counts accumulated
-   across all loan-month pairs 12 months apart).
-4. Yearly aggregation — transition rates averaged by reporting year for
-   trend analysis.
-5. MEV correlation & selection — candidate macroeconomic variables (GDP,
-   unemployment, HPI, credit growth, etc.) are tested against the yearly ODR
-   series on both correlation strength (|r| > 0.50) and expected sign, to
-   select variables for downstream PD scenario modeling.
+1. **Batch processing with checkpointing** — the full performance panel
+   (~565M rows) is too large to load in memory, so it's processed in chunks
+   via `pyarrow.parquet` batch iteration, with per-batch checkpoint/resume
+   logic (parquet accumulator + progress file) to survive interruptions on
+   long-running jobs.
+2. **Before-transition snapshot** — month-by-month share of loans in each
+   delinquency bucket, as a raw baseline diagnostic.
+3. **12-month forward transition** — for each starting bucket, computes the
+   12-month roll-to-default rate.
+4. **Yearly aggregation** — transition rates averaged by reporting year (2018–2022).
+5. **MEV correlation & selection** — candidate macroeconomic variables tested
+   against the yearly ODR series on correlation strength (|r| > 0.50) and
+   expected sign.
+6. **Scenario construction & PIT conversion** — baseline/optimistic/pessimistic
+   MEV scenarios (2023–2027) combined into a final economic factor, used to
+   convert TTC PD to PIT PD via Vasicek/ASRF (rho = 0.15), then converted to
+   unconditional PD via survival analysis and scenario-weighted (80/10/10)
+   into final Stage 1 (1-year) and Stage 2 (cumulative lifetime) PDs.
 
-## Findings (expanded)
+## Findings
+
 ### 1. Before transition — raw delinquency snapshot
-- The `dpd_rate_trend.png` plot shows the COVID shock clearly: 1-30 DPD rose
-  first in Apr–May 2020, followed by 31-60 and 61-90 buckets, and a later
-  rise in 91+ DPD.
-- Early-stage buckets spiked sharply and then retraced as many loans cured or
-  entered forbearance; however, their levels stayed elevated for a period
-  which sustained inflows into 91+ DPD even as the immediate shock faded.
-- By 2022 the series broadly normalized but remained above the pre-2020
-  trough in certain vintages — important when constructing TTC vs PIT PDs.
+`dpd_rate_trend.png`
+
+The COVID shock produced a textbook roll-rate cascade: 1-30 DPD spiked first
+(Apr 2020), followed by 31-60 DPD, then 61-90 DPD — each peak smaller than the
+last as borrowers cured or entered forbearance. Early-stage buckets declined
+from their peaks but stayed above pre-pandemic levels for an extended period,
+which kept feeding inflow into 91+ DPD even as the shock itself faded —
+declining ≠ normalized. By 2022, delinquency levels broadly normalized, aided
+by home-price appreciation, stimulus, and low rates acting as a credit-loss
+absorption mechanism rather than a conversion into permanent losses.
 
 ### 2. After transition — 12-month roll-to-default check
-- The `bucket_transition_trend.png` chart shows that 12-month roll-to-default
-  rates rise monotonically with starting delinquency severity. Loans starting
-  Current have the lowest 12-month roll-to-default; 61-90 DPD and 31-60 DPD
-  show much higher conversion rates.
-- The 2020 spike in transitions (the COVID cascade) is visible across all
-  buckets, with particularly large increases for 31-90 DPD starting points.
-  This validates the transition-based approach for PD term-structure
-  construction and highlights the importance of stress-period conditioning
-  when estimating PIT behavior.
+`bucket_transition_trend.png`
 
-### 3. Macro variables vs yearly ODR (selection)
-- `selected_mev_vs_odr.png` overlays several macro indicators (real GDP
-  growth, industrial production, house-price growth indices, unemployment,
-  etc.) with the yearly ODR series.
-- The screening step in the notebook tests for correlation magnitude and
-  expected sign; variables that pass are candidates for scenario-based
-  mapping into PIT PDs.
+The 12-month forward transition rate increases sharply and monotonically with
+delinquency severity at the starting point. Loans starting Current show the
+lowest 12-month roll-to-default rate by a wide margin; loans starting 61-90
+DPD roll to default at dramatically higher rates, since that population has
+already survived multiple cure opportunities without curing.
+
+### 3. Selected MEV vs ODR
+`selected_mev_vs_odr.png`
+
+Each macroeconomic variable that passed the sign and correlation-strength
+test is plotted against the yearly ODR series to visually confirm the
+relationship the statistical test picked up, before being carried forward
+into scenario construction.
 
 ## Output files
 | File | Description |
@@ -114,50 +169,36 @@ Delinquency buckets used: Current, 1-30 DPD, 31-60 DPD, 61-90 DPD, 91+ DPD (defa
 | `selected_mev_vs_odr.png` | Selected macro variables plotted against ODR |
 | `roll_rate_12m_transition.parquet` | Full 12-month transition rate matrix |
 
-## How to reproduce
-1. Create a Python 3.8+ virtual environment and install requirements:
+## Limitations
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+1. **Missing-data handling.** Ideally, single missing (`NR`) reporting months
+   between two known values would be imputed with a rule-based approach
+   (inferring the missing bucket from the surrounding values). Due to RAM and
+   storage constraints of processing this on a personal laptop, this wasn't
+   feasible at scale, so any loan with even one missing reporting month was
+   dropped entirely — reducing the usable population from ~17 million to
+   ~1.3 million loans. This is a completeness trade-off, not a methodological
+   choice, and a more capable compute environment would likely recover a
+   meaningfully larger and possibly differently-composed sample.
 
-2. Place the Freddie Mac performance panel files (parquet) into `data/`
-   (or point the notebook to your S3 / local path). Ensure the file naming
-   and schema match the notebook expectations.
+2. **Short ODR/MEV correlation window.** Storage constraints limited the ODR
+   series used for MEV correlation and selection to **5 years (2018–2022)**.
+   A longer historical window could change both the correlation strength and
+   sign for some variables, and potentially the final set of selected MEVs.
 
-3. Run the notebook or the script that performs batch processing. For large
-   datasets we recommend running on a machine with >= 16GB RAM and fast
-   disk; the code uses parquet batch iteration and per-batch checkpointing to
-   allow resumption on interruptions.
-
-4. Outputs (plots + `roll_rate_12m_transition.parquet`) appear under `outputs/`.
-
-## Suggested usage and interpretation
-- Use the 12-month roll-to-default series by starting bucket as empirical
-  anchors when building vintage- or bucket-based PD term-structures.
-- For IFRS 9 / Ind AS 109 provisioning, map macro scenarios (baseline/
-  optimistic/pessimistic) to the selected MEVs and then to PIT PDs using the
-  correlation/selection logic shown in the notebook.
-- Treat the COVID period as a stress scenario: blending TTC and PIT views is
-  recommended for long-dated portfolios if the calibration window includes
-  major structural shocks.
+3. **Retained correlated MEV pairs.** Two pairs among the selected MEVs are
+   conceptually overlapping — `Ind_Prod_Index` / `Ind_Prod_Growth_Pct`, and
+   `Case_Shiller_Growth_Pct` / `FHFA_HPI_Growth_Pct`. One variable from each
+   pair could reasonably have been dropped to reduce multicollinearity, but
+   both were retained since each independently passed the sign and
+   correlation-strength tests.
 
 ## Tech stack
-Python, pandas, pyarrow (batch parquet processing), NumPy, SciPy, Matplotlib.
+Python, pandas, pyarrow (batch parquet processing), NumPy, SciPy, Matplotlib
 
 ## Notes
 Built as part of a broader ECL provisioning pipeline aligned with IFRS 9 /
 Ind AS 109 principles — roll rates feed into PD term-structure construction
-via Vasicek/ASRF TTC-to-PIT conversion (see related notebook/repo). Also
-relevant to RBI's upcoming ECL-based provisioning framework (effective April
-2027), which will replace the current IRAC norms for Indian banks and NBFCs.
-
-## Contact
-Open an issue or contact the repository owner for questions or requests for
-exporting different figures or adding alternative macro indicators.
-
-## License
-Pick a license you prefer (MIT / Apache-2.0 / CC-BY). If none is present,
-consider adding `LICENSE`.
+via Vasicek/ASRF TTC-to-PIT conversion. Also relevant to RBI's upcoming
+ECL-based provisioning framework (effective April 2027), which will replace
+the current IRAC norms for Indian banks and NBFCs.
